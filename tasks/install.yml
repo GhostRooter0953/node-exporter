@@ -1,0 +1,83 @@
+---
+
+- name: create user
+  user:
+    name: "{{ node_exporter_user_name }}"
+    home: "/nonexistent"
+    create_home: no
+    shell: "/bin/false"
+    system: yes
+
+- name: check if binary file exists
+  stat:
+    path: "{{ node_exporter_dirs.binary_dir }}/{{ node_exporter_binary_name }}"
+  register: binary_file
+
+- name: get binary
+  block:
+    - name: download tar.gz
+      get_url:
+        url: "{{ node_exporter_targz_url }}"
+        dest: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        checksum: "{{ node_exporter_targz_sums }}"
+
+    - name: "extract binary to {{ node_exporter_dirs.binary_dir }}"
+      unarchive:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: "{{ node_exporter_dirs.binary_dir }}"
+        owner: root
+        group: root
+        remote_src: yes
+        extra_opts:
+          - --strip-components=1
+          - "node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+
+    - name: remove tar.gz
+      file:
+        path: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        state: absent
+  when: not binary_file.stat.exists and not ansible_check_mode
+
+- name: include tasks for nvme metrics collection
+  include_tasks: nvme.yml
+  when: node_exporter_collect_nvme_metrics and not ansible_check_mode
+
+- name: create systemd unit
+  template:
+    src: systemd-unit.j2
+    dest: "{{ node_exporter_systemd_unit }}"
+  notify:
+    - reload node_exporter unit
+    - restart node_exporter service
+
+- name: ensure that configuration directory exists
+  file:
+    path: "{{ node_exporter_dirs.config_dir }}"
+    state: directory
+
+- name: prepare directory for textfile collector
+  file:
+    path: "{{ node_exporter_dirs.textfile_collector_dir }}"
+    state: directory
+    owner: "root"
+    group: "{{ node_exporter_user_name }}"
+    mode: '0750'
+  when: (node_exporter_collect_nvme_metrics
+        or 'textfile' in node_exporter_enabled_collectors)
+        and not ansible_check_mode
+
+- name: create exporter configuration file
+  template:
+    src: exporter-cfg.j2
+    dest: "{{ node_exporter_dirs.config_dir }}/{{ node_exporter_config_file }}"
+    owner: root
+    group: "{{ node_exporter_user_name }}"
+    mode: 0640
+  notify: restart node_exporter service
+
+- meta: flush_handlers
+
+- name: enable service
+  systemd:
+    name: "{{ node_exporter_service_name }}"
+    enabled: true
